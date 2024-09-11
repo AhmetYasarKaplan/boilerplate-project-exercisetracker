@@ -89,24 +89,134 @@ app.get("/api/users/:_id/logs", async (req, res) => {
   const id = req.params._id;
   const from = req.query.from;
   const to = req.query.to;
-  const limit = req.query.limit;
+  const limit = req.query.limit ? parseInt(req.query.limit) : null;
 
-  let query = "SELECT * FROM logs WHERE user_id = $1";
-  let queryParams = [id];
+  /*   let query = `
+    WITH filtered_logs AS (
+      SELECT 
+        u.user_id, 
+        u.username, 
+        COUNT(e.exercise_id) AS count,
+        JSON_AGG(
+          json_build_object(
+            'description', e.description,
+            'duration', e.duration,
+            'date', to_char(e.date, 'Dy Mon DD YYYY')
+          )
+          ORDER BY e.date DESC
+        ) AS log
+      FROM users u
+      LEFT JOIN exercises e ON u.user_id = e.user_id
+      WHERE u.user_id = $1
+        ${from ? "AND e.date >= $2::date" : ""}
+        ${to ? `AND e.date <= $${from ? "3" : "2"}::date` : ""}
+      GROUP BY u.user_id, u.username
+    )
+    SELECT 
+      user_id AS "_id", 
+      username, 
+      count,
+      CASE 
+        WHEN $${from && to ? "4" : from || to ? "3" : "2"}::int IS NOT NULL THEN 
+          (SELECT COALESCE(JSON_AGG(t), '[]'::json) 
+           FROM (SELECT (t->>'description') as description,
+                        (t->>'duration')::int as duration,
+                        (t->>'date') as date
+                 FROM JSON_ARRAY_ELEMENTS(log::json) t
+                 LIMIT $${from && to ? "4" : from || to ? "3" : "2"}::int) t)
+        ELSE 
+          log
+      END AS log
+    FROM filtered_logs;
+  `; */
 
-  //TODO: Add from, to, limit functionality to query
-  // if (limit) {
-  //   query += " LIMIT $2";
-  //   queryParams.push(limit);
-  // }
-  console.log(queryParams);
+  /* let query = `
+    WITH filtered_logs AS (
+      SELECT *
+      FROM logs
+      WHERE user_id = $1
+    )
+    SELECT 
+      user_id AS "_id", 
+      username, 
+      CASE 
+        WHEN $2::int IS NOT NULL THEN 
+          LEAST(count, $2::int)
+        ELSE 
+          count
+      END AS count,
+      CASE 
+        WHEN $2::int IS NOT NULL THEN 
+          (SELECT COALESCE(JSON_AGG(t), '[]'::json) 
+           FROM (SELECT (t->>'description') as description,
+                        (t->>'duration')::int as duration,
+                        (t->>'date') as date
+                 FROM JSON_ARRAY_ELEMENTS(log::json) t
+                 ${from ? "WHERE (t->>'date')::date >= $3::date" : ""}
+                 ${to ? `${from ? "AND" : "WHERE"} (t->>'date')::date <= $${from ? "4" : "3"}::date` : ""}
+                 LIMIT $2::int) t)
+        ELSE 
+          (SELECT COALESCE(JSON_AGG(t), '[]'::json)
+           FROM JSON_ARRAY_ELEMENTS(log::json) t
+           ${from ? "WHERE (t->>'date')::date >= $3::date" : ""}
+           ${to ? `${from ? "AND" : "WHERE"} (t->>'date')::date <= $${from ? "4" : "3"}::date` : ""})
+      END AS log
+    FROM filtered_logs;
+  `;*/
+
+  let query = `
+    WITH filtered_logs AS (
+      SELECT *
+      FROM logs
+      WHERE user_id = $1
+    ),
+    processed_logs AS (
+      SELECT 
+        user_id,
+        username,
+        count,
+        CASE 
+          WHEN $2::int IS NOT NULL THEN 
+            (SELECT COALESCE(JSON_AGG(filtered_log ORDER BY (filtered_log->>'date')::date DESC), '[]'::json)
+             FROM (
+               SELECT filtered_log
+               FROM JSON_ARRAY_ELEMENTS(log::json) filtered_log
+               WHERE ($3::date IS NULL OR (filtered_log->>'date')::date >= $3::date)
+                 AND ($4::date IS NULL OR (filtered_log->>'date')::date <= $4::date)
+               LIMIT $2
+             ) subquery)
+          ELSE 
+            COALESCE(
+              (SELECT JSON_AGG(filtered_log ORDER BY (filtered_log->>'date')::date DESC)
+               FROM JSON_ARRAY_ELEMENTS(log::json) filtered_log
+               WHERE ($3::date IS NULL OR (filtered_log->>'date')::date >= $3::date)
+                 AND ($4::date IS NULL OR (filtered_log->>'date')::date <= $4::date)
+              ), '[]'::json
+            )
+        END AS filtered_log
+      FROM filtered_logs
+    )
+    SELECT 
+      user_id AS "_id",
+      username,
+      count,
+      filtered_log AS log
+    FROM processed_logs;
+  `;
+
+  let queryParams = [id, limit, from, to];
 
   try {
     const result = await db.query(query, queryParams);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
     res.json({
-      _id: result.rows[0].user_id,
+      _id: result.rows[0]._id,
       username: result.rows[0].username,
-      count: result.rows[0].count,
+      count: parseInt(result.rows[0].count),
       log: result.rows[0].log,
     });
   } catch (error) {
@@ -114,7 +224,6 @@ app.get("/api/users/:_id/logs", async (req, res) => {
     res.status(500).json({ error: "Database error" });
   }
 });
-
 const listener = app.listen(process.env.PORT || 3000, () => {
   console.log("Your app is listening on port " + listener.address().port);
 });
